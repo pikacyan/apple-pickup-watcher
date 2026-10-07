@@ -88,6 +88,8 @@ fn 样例设置() -> Settings {
         interval_seconds: 45,
         bark_url: "https://api.day.app/xxxx".into(),
         feishu_webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/yyyy".into(),
+        telegram_webhook: "https://api.telegram.org/bot123:token/sendMessage?chat_id=-100123"
+            .into(),
         sound_enabled: false,
         open_bag_on_hit: true,
         proxies: Vec::new(),
@@ -498,6 +500,7 @@ fn 设置的线上格式是小驼峰() {
         "intervalSeconds",
         "barkUrl",
         "feishuWebhook",
+        "telegramWebhook",
         "soundEnabled",
         "openBagOnHit",
         "proxies",
@@ -505,7 +508,7 @@ fn 设置的线上格式是小驼峰() {
         assert!(obj.contains_key(key), "缺少字段 {key}：{value}");
     }
     assert!(!obj.contains_key("interval_seconds"), "不该有蛇形字段");
-    assert_eq!(obj.len(), 8);
+    assert_eq!(obj.len(), 9);
 }
 
 #[test]
@@ -594,11 +597,11 @@ fn 代理地址只留合法的并去重() {
 }
 
 // ---------------------------------------------------------------------------
-// 推送地址：界面上是一个列表，文件里按渠道分两栏存
+// 推送地址：界面上是一个列表，文件里按渠道分栏存
 // ---------------------------------------------------------------------------
 
 #[test]
-fn 推送地址按长相归到bark或飞书() {
+fn 推送地址按长相归到对应渠道() {
     use apw_core::config::{PushKind, push_kind};
 
     for feishu in [
@@ -621,6 +624,13 @@ fn 推送地址按长相归到bark或飞书() {
     ] {
         assert_eq!(push_kind(bark), PushKind::Bark, "{bark:?}");
     }
+    for telegram in [
+        "https://api.telegram.org/bot123:token/sendMessage?chat_id=42",
+        "https://telegram.example.com/botTOKEN/sendMessage?chat_id=-1001",
+        "api.telegram.org/botTOKEN/sendMessage?chat_id=42",
+    ] {
+        assert_eq!(push_kind(telegram), PushKind::Telegram, "{telegram:?}");
+    }
 }
 
 #[test]
@@ -628,6 +638,7 @@ fn 推送地址整组替换时各归各的渠道并去重() {
     let b1 = "https://api.day.app/b1";
     let b2 = "https://api.day.app/b2";
     let f1 = "https://open.feishu.cn/open-apis/bot/v2/hook/f1";
+    let t1 = "https://api.telegram.org/bot123:token/sendMessage?chat_id=-1001";
     let mut s = Settings::default();
     s.set_push_urls(&[
         format!(" {f1} "),
@@ -635,14 +646,16 @@ fn 推送地址整组替换时各归各的渠道并去重() {
         String::new(),
         // 老版本里用分号连着的一整串被粘进了同一行。
         format!("{b2};{b1}"),
+        t1.to_string(),
     ]);
     assert_eq!(s.bark_url, format!("{b1};{b2}"));
     assert_eq!(s.feishu_webhook, f1);
-    // 读回来是 Bark 在前、飞书在后，各自保持填写顺序。
-    assert_eq!(s.push_urls(), vec![b1, b2, f1]);
+    assert_eq!(s.telegram_webhook, t1);
+    // 读回来是 Bark、飞书、Telegram 依次排列，各自保持填写顺序。
+    assert_eq!(s.push_urls(), vec![b1, b2, f1, t1]);
 
     s.set_push_urls(&[]);
-    assert!(s.bark_url.is_empty() && s.feishu_webhook.is_empty());
+    assert!(s.bark_url.is_empty() && s.feishu_webhook.is_empty() && s.telegram_webhook.is_empty());
     assert!(s.push_urls().is_empty());
 }
 

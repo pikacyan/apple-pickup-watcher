@@ -71,6 +71,7 @@ const DEFAULT_SETTINGS: Settings = {
   intervalSeconds: 30,
   barkUrl: "",
   feishuWebhook: "",
+  telegramWebhook: "",
   soundEnabled: true,
   openBagOnHit: true,
   proxies: [],

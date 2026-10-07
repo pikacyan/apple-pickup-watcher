@@ -15,7 +15,7 @@ use apw_core::apple::{AppleClient, ClientConfig};
 use apw_core::catalog::Catalog;
 use apw_core::config::{MIN_INTERVAL_SECONDS, Settings, SettingsStore};
 use apw_core::model::{Category, Product, REGIONS, Store, Target, region_by_locale};
-use apw_core::notify::{Bark, Feishu, Multi, Notification, Notifier, Sound};
+use apw_core::notify::{Bark, Feishu, Multi, Notification, Notifier, Sound, Telegram};
 use apw_core::watcher::{Event, TargetState, Watcher, WatcherConfig};
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
@@ -347,6 +347,15 @@ async fn dispatch_notification(
         // 共享连接池，渠道各自报错。
         for feishu in Feishu::from_list(&settings.feishu_webhook, http) {
             channels.push(feishu);
+        }
+    }
+    if !settings.telegram_webhook.trim().is_empty() {
+        let http = app
+            .try_state::<AppState>()
+            .map(|s| s.http.clone())
+            .unwrap_or_default();
+        for telegram in Telegram::from_list(&settings.telegram_webhook, http) {
+            channels.push(telegram);
         }
     }
     if channels.is_empty() {

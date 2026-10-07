@@ -36,8 +36,9 @@ function renderApp() {
         // 模拟后端分栏存放。真正的归类规则在 Rust 侧，由 crates/apw-core/tests/config.rs 覆盖；
         // 这里只需要让界面拿到「哪个地址存在哪一栏」。
         const feishu = urls.filter((url) => url.includes("/open-apis/bot/v2/hook/"));
-        const bark = urls.filter((url) => !feishu.includes(url));
-        state.settings = { ...state.settings, barkUrl: bark.join(";"), feishuWebhook: feishu.join(";") };
+        const telegram = urls.filter((url) => url.includes("/bot") && url.includes("/sendMessage"));
+        const bark = urls.filter((url) => !feishu.includes(url) && !telegram.includes(url));
+        state.settings = { ...state.settings, barkUrl: bark.join(";"), feishuWebhook: feishu.join(";"), telegramWebhook: telegram.join(";") };
       },
     };
     if (specifier.startsWith("@/components/") || specifier === "lucide-react") {

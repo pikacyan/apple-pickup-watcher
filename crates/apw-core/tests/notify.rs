@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use apw_core::notify::{Bark, Feishu, Multi, Notification, Notifier, NotifyError, Sound};
+use apw_core::notify::{Bark, Feishu, Multi, Notification, Notifier, NotifyError, Sound, Telegram};
 
 // ---------------------------------------------------------------------------
 // 极简 HTTP 测试服务端
@@ -172,6 +172,33 @@ fn client() -> reqwest::Client {
 fn 到货通知() -> Notification {
     Notification::new("到货/提醒", "上海-环球港 iPhone 17 有货")
         .with_url("https://www.apple.com.cn/shop/bag?step=1&next=2")
+}
+
+// ---------------------------------------------------------------------------
+// Telegram
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn telegram发送send_message并识别bot_api结果() {
+    let good = TestServer::start("200 OK", r#"{"ok":true,"result":{}}"#);
+    let endpoint = format!("http://{}/botSECRET/sendMessage?chat_id=-100123", good.addr);
+    Telegram::new(endpoint, client())
+        .notify(&到货通知())
+        .await
+        .expect("ok=true 应当成功");
+    assert_eq!(good.count(), 1);
+    assert_eq!(good.target(), "/botSECRET/sendMessage?chat_id=-100123");
+
+    let bad = TestServer::start(
+        "200 OK",
+        r#"{"ok":false,"error_code":400,"description":"chat not found"}"#,
+    );
+    let endpoint = format!("http://{}/botSECRET/sendMessage?chat_id=42", bad.addr);
+    let err = Telegram::new(endpoint, client())
+        .notify(&到货通知())
+        .await
+        .expect_err("ok=false 必须报错");
+    assert!(matches!(err, NotifyError::Remote { code: 400, .. }));
 }
 
 // ---------------------------------------------------------------------------
@@ -682,6 +709,20 @@ async fn 飞书连不上时错误信息里没有机器人密钥() {
     assert!(matches!(err, NotifyError::Transport { .. }), "{err}");
     assert_no_secret(&err, "SECRET-HOOK-TOKEN");
     assert!(err.to_string().contains("error sending request："), "{err}");
+}
+
+#[tokio::test]
+async fn telegram连不上时错误信息里没有bot_token() {
+    let addr = closed_port();
+    let err = Telegram::new(
+        format!("http://{addr}/botSECRET-BOT-TOKEN/sendMessage?chat_id=42"),
+        client(),
+    )
+    .notify(&到货通知())
+    .await
+    .expect_err("端口没人监听，推送必须失败");
+    assert!(matches!(err, NotifyError::Transport { .. }), "{err}");
+    assert_no_secret(&err, "SECRET-BOT-TOKEN");
 }
 
 #[tokio::test]

@@ -137,7 +137,7 @@ pub struct Settings {
     /// Bark 推送地址，为空表示不启用。多个地址在文件里用分号连成一个字符串，
     /// 见 [`Settings::bark_urls`]；字段仍是一个字符串，旧配置原样可读。
     ///
-    /// 界面上 Bark 和飞书是同一个「推送地址」列表，用户不用自己选渠道：
+    /// 界面上 Bark、飞书和 Telegram 是同一个「推送地址」列表，用户不用自己选渠道：
     /// 读写都走 [`Settings::push_urls`] / [`Settings::set_push_urls`]，
     /// 每个地址归哪个渠道由 [`push_kind`] 按长相判断，这两个字段只是存法。
     pub bark_url: String,
@@ -145,6 +145,10 @@ pub struct Settings {
     /// [`Settings::bark_url`]。创建机器人时安全设置选「自定义关键词」并填
     /// 「有货」即可，提醒标题「有货了」天然命中。
     pub feishu_webhook: String,
+    /// Telegram Bot API 的 `sendMessage` 地址，为空表示不启用；地址需同时包含
+    /// bot token 和 `chat_id`，例如
+    /// `https://api.telegram.org/bot<TOKEN>/sendMessage?chat_id=<CHAT_ID>`。
+    pub telegram_webhook: String,
     /// 有货时是否播放提示音。
     pub sound_enabled: bool,
     /// 有货时是否自动打开购物袋页面。
@@ -170,6 +174,7 @@ impl Default for Settings {
             interval_seconds: DEFAULT_INTERVAL_SECONDS,
             bark_url: String::new(),
             feishu_webhook: String::new(),
+            telegram_webhook: String::new(),
             sound_enabled: true,
             open_bag_on_hit: true,
             proxies: Vec::new(),
@@ -244,7 +249,7 @@ impl Settings {
         split_bark_urls(&self.bark_url)
     }
 
-    /// 全部推送地址：Bark 在前、飞书在后，各自保持填写顺序，去掉重复。
+    /// 全部推送地址：Bark、飞书、Telegram 依次排列，各自保持填写顺序，去掉重复。
     pub fn push_urls(&self) -> Vec<String> {
         let mut all = split_bark_urls(&self.bark_url);
         for url in split_bark_urls(&self.feishu_webhook) {
@@ -252,24 +257,32 @@ impl Settings {
                 all.push(url);
             }
         }
+        for url in split_bark_urls(&self.telegram_webhook) {
+            if !all.contains(&url) {
+                all.push(url);
+            }
+        }
         all
     }
 
-    /// 用一组推送地址整体替换现有的，逐个按 [`push_kind`] 归到 Bark 或飞书。
+    /// 用一组推送地址整体替换现有的，逐个按 [`push_kind`] 归到 Bark、飞书或 Telegram。
     ///
     /// 每一项还会再按分号、换行和空白拆开：用户把老版本里分号连着的一整串
     /// 粘进一行，也能拆成几个地址各归各的渠道。
     pub fn set_push_urls(&mut self, urls: &[String]) {
         let mut bark: Vec<String> = Vec::new();
         let mut feishu: Vec<String> = Vec::new();
+        let mut telegram: Vec<String> = Vec::new();
         for url in split_bark_urls(&urls.join("\n")) {
             match push_kind(&url) {
                 PushKind::Bark => bark.push(url),
                 PushKind::Feishu => feishu.push(url),
+                PushKind::Telegram => telegram.push(url),
             }
         }
         self.bark_url = bark.join(";");
         self.feishu_webhook = feishu.join(";");
+        self.telegram_webhook = telegram.join(";");
     }
 }
 
@@ -278,31 +291,47 @@ impl Settings {
 pub enum PushKind {
     Bark,
     Feishu,
+    Telegram,
 }
 
 /// 飞书（含 Lark 国际版）群机器人 webhook 固定的路径前缀。
 const FEISHU_HOOK_PATH: &str = "/open-apis/bot/v2/hook/";
 
+/// Telegram Bot API 发送文本消息的路径形态。
+const TELEGRAM_BOT_PREFIX: &str = "/bot";
+const TELEGRAM_SEND_SUFFIX: &str = "/sendMessage";
+
 /// 按地址长相判断推送渠道。
 ///
-/// 飞书群机器人的 webhook 路径是固定的，认得出来；其余一律当 Bark。自建的 Bark
+/// 飞书和 Telegram Bot API 的路径是固定的，认得出来；其余一律当 Bark。自建的 Bark
 /// 服务器主机名五花八门，没法逐个认，只能兜底。判断放在 Rust 这一侧、界面不另
 /// 抄一份：抄一份，迟早会有一边先认了新渠道、另一边还按老规矩归类。
 pub fn push_kind(url: &str) -> PushKind {
     let url = url.trim();
-    let feishu = match reqwest::Url::parse(url) {
-        Ok(parsed) => parsed.path().starts_with(FEISHU_HOOK_PATH),
+    let parsed = reqwest::Url::parse(url).ok();
+    let feishu = match &parsed {
+        Some(parsed) => parsed.path().starts_with(FEISHU_HOOK_PATH),
         // 漏写协议之类解析不了的地址按字面找：先归对渠道，发送时报的错才对得上号。
-        Err(_) => url.contains(FEISHU_HOOK_PATH),
+        None => url.contains(FEISHU_HOOK_PATH),
     };
     if feishu {
-        PushKind::Feishu
+        return PushKind::Feishu;
+    }
+    let telegram = parsed.as_ref().map_or_else(
+        || url.contains(TELEGRAM_BOT_PREFIX) && url.contains(TELEGRAM_SEND_SUFFIX),
+        |parsed| {
+            parsed.path().starts_with(TELEGRAM_BOT_PREFIX)
+                && parsed.path().ends_with(TELEGRAM_SEND_SUFFIX)
+        },
+    );
+    if telegram {
+        PushKind::Telegram
     } else {
         PushKind::Bark
     }
 }
 
-/// 把设置里的推送地址拆成一条条：分号、换行、空白都算分隔符。Bark 和飞书共用，
+/// 把设置里的推送地址拆成一条条：分号、换行、空白都算分隔符。所有远程渠道共用，
 /// 名字是只有 Bark 时起的。
 ///
 /// 文件里多个地址用分号连成一个字符串（issue #35 起就是这个存法）。放在这里而不是 `notify` 模块，是因为后者挂在 `notifications` feature 后面，
@@ -680,6 +709,8 @@ impl LegacySettings {
             bark_url: self.bark_url.unwrap_or(fallback.bark_url),
             // Go 版没有飞书推送，迁移过来的文件一律从空开始。
             feishu_webhook: String::new(),
+            // Go 版没有 Telegram 推送，迁移过来的文件一律从空开始。
+            telegram_webhook: String::new(),
             sound_enabled: self.sound_enabled.unwrap_or(fallback.sound_enabled),
             open_bag_on_hit: self.open_bag_on_hit.unwrap_or(fallback.open_bag_on_hit),
             // Go 版没有代理设置，迁移过来的文件一律从空开始。

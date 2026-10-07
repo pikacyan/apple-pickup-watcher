@@ -1,7 +1,7 @@
 //! 到货提醒的发送渠道。
 //!
-//! 这里只做「把一条通知送出去」这一件事：[`Bark`] 远程推送、[`Sound`] 本地
-//! 提示音，以及把若干渠道并发组合起来的 [`Multi`]。
+//! 这里只做「把一条通知送出去」这一件事：[`Bark`]、[`Feishu`]、[`Telegram`]
+//! 远程推送、[`Sound`] 本地提示音，以及把若干渠道并发组合起来的 [`Multi`]。
 //!
 //! 刻意**不**包含系统桌面通知：那需要界面框架的句柄，放进来会让整个 crate
 //! 无法脱离 GUI 单独测试，也会把 UI 依赖传染给调度层。
@@ -682,6 +682,158 @@ fn feishu_business_error(body: &[u8]) -> Option<(i64, String)> {
 }
 
 // ---------------------------------------------------------------------------
+// Telegram Bot
+// ---------------------------------------------------------------------------
+
+const TELEGRAM: &str = "Telegram";
+const TELEGRAM_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 通过 Telegram Bot API 的 `sendMessage` 方法推送文本。
+///
+/// 为了与界面的统一「推送地址」列表兼容，bot token 与 chat id 都放在一个 URL 中：
+/// `https://api.telegram.org/bot<TOKEN>/sendMessage?chat_id=<CHAT_ID>`。
+/// Telegram 群组、频道和私聊都可使用；群组的 chat id 通常是负数。
+#[derive(Debug, Clone)]
+pub struct Telegram {
+    endpoint: String,
+    http: reqwest::Client,
+    timeout: Duration,
+    name: String,
+}
+
+impl Telegram {
+    pub fn new(endpoint: String, http: reqwest::Client) -> Self {
+        Self {
+            endpoint: endpoint.trim().to_string(),
+            http,
+            timeout: TELEGRAM_TIMEOUT,
+            name: TELEGRAM.to_string(),
+        }
+    }
+
+    pub fn from_list(raw: &str, http: reqwest::Client) -> Vec<Self> {
+        let urls = split_bark_urls(raw);
+        let many = urls.len() > 1;
+        urls.into_iter()
+            .enumerate()
+            .map(|(i, url)| {
+                let mut telegram = Self::new(url, http.clone());
+                if many {
+                    telegram.name = format!("{TELEGRAM} #{}", i + 1);
+                }
+                telegram
+            })
+            .collect()
+    }
+
+    pub fn is_configured(&self) -> bool {
+        !self.endpoint.is_empty()
+    }
+}
+
+impl Notifier for Telegram {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn notify(&self, n: &Notification) -> Result<(), NotifyError> {
+        if !self.is_configured() {
+            return Ok(());
+        }
+
+        let url = validate_telegram_endpoint(&self.endpoint)?;
+        let mut resp = self
+            .http
+            .post(url)
+            .timeout(self.timeout)
+            .json(&serde_json::json!({
+                "text": feishu_text(n),
+                "disable_web_page_preview": false,
+            }))
+            .send()
+            .await
+            .map_err(|e| NotifyError::Transport {
+                channel: self.name.clone(),
+                detail: describe_http_error(e),
+            })?;
+
+        let status = resp.status();
+        let body = read_capped(&mut resp, BARK_MAX_BODY, &self.name).await?;
+        if !status.is_success() {
+            return Err(NotifyError::Rejected {
+                channel: self.name.clone(),
+                status: status.as_u16(),
+                body: summarize(&body),
+            });
+        }
+        if let Some((code, message)) = telegram_business_error(&body) {
+            return Err(NotifyError::Remote {
+                channel: self.name.clone(),
+                code,
+                message,
+            });
+        }
+        Ok(())
+    }
+}
+
+fn validate_telegram_endpoint(endpoint: &str) -> Result<Url, NotifyError> {
+    let u = Url::parse(endpoint).map_err(|e| telegram_config_err(format!("地址无法解析：{e}")))?;
+    if !matches!(u.scheme(), "http" | "https") || u.host_str().unwrap_or_default().is_empty() {
+        return Err(telegram_config_err(format!(
+            "地址必须是以 http:// 或 https:// 开头的完整地址，当前为 {}",
+            redacted(&u)
+        )));
+    }
+    let path = u.path().trim_end_matches('/');
+    let token = path
+        .strip_prefix("/bot")
+        .and_then(|path| path.strip_suffix("/sendMessage"))
+        .unwrap_or_default();
+    if token.is_empty() || token.contains('/') {
+        return Err(telegram_config_err(
+            "地址应形如 https://api.telegram.org/bot<TOKEN>/sendMessage?chat_id=<CHAT_ID>"
+                .to_string(),
+        ));
+    }
+    let chat_id = u
+        .query_pairs()
+        .find_map(|(key, value)| (key == "chat_id").then(|| value.into_owned()))
+        .unwrap_or_default();
+    if chat_id.trim().is_empty() {
+        return Err(telegram_config_err("地址缺少 chat_id 查询参数".to_string()));
+    }
+    Ok(u)
+}
+
+fn telegram_config_err(detail: String) -> NotifyError {
+    NotifyError::Config {
+        channel: TELEGRAM.to_string(),
+        detail,
+    }
+}
+
+fn telegram_business_error(body: &[u8]) -> Option<(i64, String)> {
+    #[derive(serde::Deserialize)]
+    struct Payload {
+        #[serde(default)]
+        ok: Option<bool>,
+        #[serde(default)]
+        error_code: Option<i64>,
+        #[serde(default)]
+        description: Option<String>,
+    }
+
+    let payload: Payload = serde_json::from_slice(body).ok()?;
+    (payload.ok == Some(false)).then(|| {
+        (
+            payload.error_code.unwrap_or(-1),
+            payload.description.unwrap_or_default(),
+        )
+    })
+}
+
+// ---------------------------------------------------------------------------
 // 本地提示音
 // ---------------------------------------------------------------------------
 
@@ -1330,6 +1482,41 @@ mod tests {
         assert_eq!(
             feishu_business_error(r#"{"code":19024,"msg":"Key Words Not Found"}"#.as_bytes()),
             Some((19024, "Key Words Not Found".to_string()))
+        );
+    }
+
+    #[test]
+    fn telegram地址必须包含token和chat_id() {
+        for bad in [
+            "",
+            "不是地址",
+            "ftp://api.telegram.org/botTOKEN/sendMessage?chat_id=42",
+            "https://api.telegram.org/sendMessage?chat_id=42",
+            "https://api.telegram.org/botTOKEN/sendMessage",
+        ] {
+            let err = validate_telegram_endpoint(bad)
+                .err()
+                .unwrap_or_else(|| panic!("{bad:?} 不该被接受"));
+            assert_eq!(err.channel(), Some("Telegram"), "{bad:?}");
+            assert!(matches!(err, NotifyError::Config { .. }), "{bad:?}");
+        }
+        let url = validate_telegram_endpoint(
+            "https://api.telegram.org/bot123:token/sendMessage?chat_id=-100123",
+        )
+        .expect("正常地址必须能通过");
+        assert_eq!(url.path(), "/bot123:token/sendMessage");
+    }
+
+    #[test]
+    fn telegram业务错误只在ok明确为false时返回() {
+        assert_eq!(telegram_business_error(br#"{"ok":true}"#), None);
+        assert_eq!(telegram_business_error(br#"{"result":{}}"#), None);
+        assert_eq!(telegram_business_error(b"not json"), None);
+        assert_eq!(
+            telegram_business_error(
+                br#"{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}"#,
+            ),
+            Some((400, "Bad Request: chat not found".to_string()))
         );
     }
 }
